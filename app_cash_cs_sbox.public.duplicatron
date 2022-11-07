@@ -1,0 +1,130 @@
+
+
+CREATE OR REPLACE TABLE app_cash_cs_sbox.public.duplicatron (
+      customer_token                VARCHAR()
+    , case_id                       VARCHAR()
+    , case_number                   VARCHAR()
+    , origin                        VARCHAR()
+    , last_assigned_queue           VARCHAR()
+    , case_creation_date            DATE
+    , case_creation_date_time       DATETIME
+    , transaction                   VARCHAR()
+    , selected_category             VARCHAR()
+    , queues_touched                NUMBER
+    , issue_tags                    VARCHAR()
+    , previous_case_number          VARCHAR()
+    , previous_last_assigned_queue  VARCHAR()
+    , previous_case_creation_date   DATE
+    , previous_origin               VARCHAR
+    , follow_flag                   BOOLEAN
+    , previous_issue_tag_raw        VARCHAR()
+    , previous_issue_tags           VARCHAR()
+    , queue_category                VARCHAR()
+    , previous_transaction          VARCHAR()
+    , time_difference               NUMBER
+    , ratio                         SMALLINT
+);
+
+INSERT OVERWRITE INTO app_cash_cs_sbox.public.duplicatron
+
+WITH case_base AS (
+    SELECT sc.customer_token
+         , sc.case_id
+         , sc.case_number
+         , sc.origin
+         , sc.last_assigned_queue
+         , sc.case_creation_date
+         , sc.case_creation_date_time
+         , sc.selected_category
+         , regexp_replace(quick_text_name, '.*[{(]|- |[)}].*','') AS reg_quick_text_name
+         , regexp_replace(cm.problem_tag, '-|', '') as reg_problem_tag
+         , coalesce(reg_problem_tag, reg_quick_text_name) as issue_tags
+         , sc.banking_transaction_token as  transaction
+    FROM app_cash_cs.public.support_cases sc
+    LEFT JOIN app_cash_cs.public.cash_case_quick_texts ccqt
+        ON sc.case_id = ccqt.case_id
+    LEFT JOIN supportal.public.cash_macros cm
+        ON cm.title = ccqt.quick_text_name
+    WHERE sc.case_creation_date >= '2022-01-01'
+      AND sc.customer_token IS NOT NULL
+    ORDER BY customer_token, case_creation_date_time desc
+    )
+, case_agg as (
+    SELECT cb.customer_token
+         , cb.case_id
+         , cb.case_number
+         , cb.origin
+         , cb.last_assigned_queue
+         , cb.case_creation_date
+         , cb.case_creation_date_time
+         , cb.transaction
+         , cb.selected_category
+         , MAX(queue_number) AS queues_touched
+         , LISTAGG(cb.issue_tags, ' ')
+                    WITHIN GROUP (ORDER BY cb.issue_tags ASC)           AS issue_tags
+    FROM app_cash_cs.public.cases_queues cq
+    INNER JOIN case_base cb
+        ON cb.case_id = cq.case_id
+    GROUP BY 1,2,3,4,5,6,7,8,9
+    ORDER BY 1 ASC, 6 ASC
+    )
+    select 
+        customer_token
+        , case_id
+        , case_number
+        , origin
+        , last_assigned_queue
+        , case_creation_date
+        , case_creation_date_time
+        , transaction
+        , selected_category
+        , queues_touched
+        , issue_tags
+        , LAG(case_number)
+            OVER (PARTITION BY customer_token ORDER BY case_creation_date ) AS previous_case_number
+        , LAG(last_assigned_queue)
+            OVER (PARTITION BY customer_token ORDER BY case_creation_date ) AS previous_last_assigned_queue
+        , LAG(case_creation_date)
+            OVER (PARTITION BY customer_token ORDER BY case_creation_date ) AS previous_case_creation_date
+        , LAG(origin)
+            OVER (PARTITION BY customer_token ORDER BY case_creation_date ) AS previous_origin
+        , CASE 
+            WHEN previous_origin ilike '%Disputron%' then true
+            ELSE false end                                                  AS follow_flag
+        , LAG(issue_tags)
+            OVER (PARTITION BY customer_token ORDER BY case_creation_date ) AS previous_issue_tag_raw
+        , case 
+            when previous_issue_tag_raw ilike '%Cash Card  Dispute Cash Card  Pending Messaging%'
+            then 'Cash Card  Dispute'
+            when previous_issue_tag_raw ilike '%Cash Card  Dispute Messaging%'
+            then 'Cash Card  Dispute'
+            when previous_issue_tag_raw ilike '%Cash Card  Dispute Cash Card  Dispute%'
+            then 'Cash Card  Dispute'
+            when previous_issue_tag_raw ilike '%Cash Card  Dispute Unclear Question%'
+            then 'Cash Card  Dispute'
+            when previous_issue_tag_raw ilike '%Cash Card  Dispute Other%'
+            then 'Cash Card  Dispute'
+            when previous_issue_tag_raw ilike '%Messaging Closing Response Other%'
+            then 'Messaging Closing Response'
+            when previous_issue_tag_raw ilike '%Case status Messaging Closing Response%'
+            then 'Case status'
+        else previous_issue_tag_raw end as previous_issue_tags
+        , CASE  
+            WHEN previous_last_assigned_queue ilike '%Dispute%' then 'Dispute'
+            WHEN previous_last_assigned_queue like any ('%Crypto%','%Bitcoin%') then 'Crypto'
+            WHEN previous_last_assigned_queue ilike '%Risk%' then 'Risk'
+            WHEN previous_last_assigned_queue ilike any '%[CHAT]%' then 'Messaging'
+            WHEN previous_last_assigned_queue ilike '%Phone%' then 'Voice'
+            WHEN previous_last_assigned_queue like any ('%B-Ops%','%Brokerage%','%Lending%','%Investing%') then 'BOLO'
+            WHEN previous_last_assigned_queue ilike '%Investing%' then 'Investing'
+            WHEN previous_last_assigned_queue like any ('%Compliance%', '%Denylist%')  then 'Compliance/Denylist'
+            WHEN previous_last_assigned_queue ilike '%Banking%' then 'Banking'
+            WHEN previous_last_assigned_queue like any ('%Global Support%','%US Support%') then 'Email'
+            WHEN previous_last_assigned_queue like any ('%GB% Support','%GB Cash Support Queue%','%Messaging UK/IE Specialty%') then 'Global'
+            ELSE 'Other' END                                                AS queue_category                            
+        , LAG(transaction)
+            OVER (PARTITION BY customer_token ORDER BY case_creation_date ) AS previous_transaction
+        , datediff('days',previous_case_creation_date, case_creation_date_time) AS time_difference
+        , null as ratio
+    from case_agg
+    order by 1 desc ,7 desc;
