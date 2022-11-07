@@ -1,0 +1,73 @@
+from multiprocessing.dummy import connection
+from pysnowflake.simple import Session
+from thefuzz import fuzz, process
+
+import pandas as pd
+
+def get_query():
+    sql_file = "/Users/kwabena/Desktop/Python/DuplicateCases/query.sql"
+
+    # Read in SQL file and split to list
+    with open(sql_file, "r") as file:
+        str = file.read()
+    return str
+
+
+def get_query_results(query):
+    with Session() as sess:
+        result = sess.execute(query)
+
+    return result
+
+def query_to_df():
+    r = get_query()
+    result = get_query_results(r)
+    df = pd.DataFrame(result)
+    return df
+def create_ratio():
+    df = query_to_df()
+    df['ratio'] = df.apply(lambda x: fuzz.token_set_ratio(x.issue_tags, x.previous_issue_tags), axis=1)
+    # should we use token sort or normal ratio
+    return df
+
+df = create_ratio()
+df.columns = map(lambda x: str(x).upper(), df.columns)
+
+def upload_to_snowflake(df, append_flag, database, schema, table):
+    """
+    to upload calculated dataframe of features onto snowflake
+    :param df:
+    :param append_flag: if false, will overwrite the table else will append to the existing table
+    :param database:
+    :param schema:
+    :param table:
+    :return:
+    """
+    for col_name in df:
+        if df[col_name].dtype == '<M8[ns]':
+            df[col_name] = df[col_name].astype(str) # this is done since NaT in datetime columns can't be written to Snowflake
+    with Session() as sess:
+        sess.execute(f"""create schema if not exists {database}.{schema} ;""")
+        if append_flag:
+            print(f"writing to {database}.{schema}.{table} in append mode")
+            sess.upsert(df, f'{database}.{schema}.{table}')
+        else:
+            print(f"writing to {database}.{schema}.{table} in replace mode")
+            sess.upload(df, f'{database}.{schema}.{table}', replace=True)
+    print("upload to snowflake done")
+    return
+
+append_flag = ""
+database = "APP_CASH_CS_SBOX"
+schema = "PUBLIC"
+table = "DUPLICATRON"
+
+upload_to_snowflake(df, append_flag, database, schema, table )
+
+
+
+
+
+
+
+
